@@ -480,12 +480,18 @@ final class QuickChatController: NSObject, NSWindowDelegate {
             self.installDismissMonitors()
         }
         guard let panel else { return }
+        if active {
+            // Synchronous hide: overlays are clickable immediately, and a fast drag's
+            // capture (80ms settle) must never include a still-fading composer.
+            panel.alphaValue = 0
+            return
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
-            panel.animator().alphaValue = active ? 0 : 1
+            panel.animator().alphaValue = 1
         } completionHandler: { [weak self] in
             Task { @MainActor in
-                if active == false { self?.focusEditor() }
+                self?.focusEditor()
             }
         }
     }

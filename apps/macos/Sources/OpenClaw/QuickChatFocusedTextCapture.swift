@@ -46,6 +46,17 @@ protocol QuickChatTextTreeNode: Sendable {
     func children(limit: Int) -> QuickChatTextTreeChildren
 }
 
+/// One-shot claim for racing unstructured tasks onto a single continuation.
+private actor QuickChatFirstClaim {
+    private var taken = false
+
+    func take() -> Bool {
+        if self.taken { return false }
+        self.taken = true
+        return true
+    }
+}
+
 enum QuickChatFocusedTextCollector {
     static let truncationMarker = "… [truncated]"
 
@@ -226,19 +237,23 @@ enum QuickChatFocusedTextCaptureService {
             return (title, collection)
         }
         // Hard outer bound: a hung target can stall individual AX reads past any
-        // cooperative check, so the wait itself races a timer and the walk is
-        // abandoned (cancelled, result discarded) on loss. The detached task may
-        // linger briefly on its current AX call; Quick Chat stays responsive.
+        // cooperative check. A structured group would JOIN the losing child (and thus
+        // still wait for the walk), so the race is unstructured: first result wins the
+        // continuation, the abandoned walk is cancelled and its result discarded.
+        let claim = QuickChatFirstClaim()
         let snapshot = await withTaskCancellationHandler {
-            await withTaskGroup(of: (String, QuickChatTextCollection)?.self) { group in
-                group.addTask { await walk.value }
-                group.addTask {
-                    try? await Task.sleep(for: .seconds(4))
-                    return nil
+            await withCheckedContinuation { (continuation: CheckedContinuation<(String, QuickChatTextCollection)?, Never>) in
+                Task.detached {
+                    let value = await walk.value
+                    if await claim.take() { continuation.resume(returning: value) }
                 }
-                let first = await group.next() ?? nil
-                group.cancelAll()
-                return first
+                Task.detached {
+                    try? await Task.sleep(for: .seconds(4))
+                    if await claim.take() {
+                        walk.cancel()
+                        continuation.resume(returning: nil)
+                    }
+                }
             }
         } onCancel: {
             walk.cancel()
