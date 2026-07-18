@@ -224,7 +224,7 @@ struct QuickChatModelTests {
             agentID: nil))
     }
 
-    @Test func `agent display parses avatar forms and monogram`() throws {
+    @Test func `agent display parses avatar forms and monogram`() {
         let imageData = Data([0x89, 0x50, 0x4E, 0x47])
         let dataSummary = AgentSummary(
             id: "molty",
@@ -298,11 +298,11 @@ struct QuickChatModelTests {
                 Data(
                     base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
         let pipelineID = try #require(model.beginCapturePipeline())
-        let send = Task { await model.sendWindowScreenshot(
+        let send = Task { await model.sendCapturedImage(
             pipelineID: pipelineID,
             data: png,
-            appName: "Safari",
-            title: "Docs") }
+            label: "Safari — Docs",
+            fileName: "window-safari.jpg") }
         while !latch.started {
             await Task.yield()
         }
@@ -369,17 +369,70 @@ struct QuickChatModelTests {
                     base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
 
         let pipelineID = try #require(model.beginCapturePipeline())
-        #expect(await model.sendWindowScreenshot(
+        #expect(await model.sendCapturedImage(
             pipelineID: pipelineID,
             data: png,
-            appName: "Safari",
-            title: "Docs"))
+            label: "Safari — Docs",
+            fileName: "window-safari.jpg"))
         #expect(receivedMessage == "Screenshot: Safari — Docs")
         #expect(receivedAttachments.count == 1)
         #expect(receivedAttachments[0].type == "file")
         #expect(receivedAttachments[0].mimeType == "image/jpeg")
         #expect(receivedAttachments[0].fileName == "window-safari.jpg")
         #expect(!receivedAttachments[0].content.hasPrefix("data:"))
+    }
+
+    @Test func `message assembly appends context block`() {
+        let context = QuickChatTextContext(
+            appName: "Safari",
+            windowTitle: "Docs",
+            text: "Selected text")
+
+        #expect(QuickChatModel.assembleMessage(draft: "Question", context: context) == """
+        Question
+
+        [Context from Safari — Docs]
+        Selected text
+        """)
+        #expect(QuickChatModel.assembleMessage(draft: "  ", context: context) == """
+        [Context from Safari — Docs]
+        Selected text
+        """)
+    }
+
+    @Test func `accepted send clears attached context`() async {
+        var receivedMessage: String?
+        let model = self.makeModel(sendHandler: { _, _, message, _, _ in
+            receivedMessage = message
+            return "ok"
+        })
+        await self.prepare(model)
+        model.replaceTextContext(QuickChatTextContext(
+            appName: "Notes",
+            windowTitle: "Plan",
+            text: "Ship it"))
+
+        #expect(model.canSend)
+        #expect(await model.send())
+        #expect(receivedMessage == """
+        [Context from Notes — Plan]
+        Ship it
+        """)
+        #expect(model.textContext == nil)
+    }
+
+    @Test func `context replaces and clears on hide`() async {
+        let model = self.makeModel()
+        await self.prepare(model)
+        let first = QuickChatTextContext(appName: "One", windowTitle: "First", text: "old")
+        let second = QuickChatTextContext(appName: "Two", windowTitle: "Second", text: "new")
+
+        model.replaceTextContext(first)
+        model.replaceTextContext(second)
+        #expect(model.textContext == second)
+
+        model.endPresentation()
+        #expect(model.textContext == nil)
     }
 
     @Test func `permission strip tracks missing permissions and session dismissal`() async {

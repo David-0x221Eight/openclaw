@@ -26,6 +26,27 @@ private final class QuickChatAgentMenuTarget: NSObject {
     }
 }
 
+private enum QuickChatCaptureMenuAction: String {
+    case window
+    case area
+}
+
+@MainActor
+private final class QuickChatCaptureMenuTarget: NSObject {
+    let onSelect: (QuickChatCaptureMenuAction) -> Void
+
+    init(onSelect: @escaping (QuickChatCaptureMenuAction) -> Void) {
+        self.onSelect = onSelect
+    }
+
+    @objc func selectCapture(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let action = QuickChatCaptureMenuAction(rawValue: rawValue)
+        else { return }
+        self.onSelect(action)
+    }
+}
+
 @MainActor
 @Observable
 final class QuickChatController: NSObject, NSWindowDelegate {
@@ -63,7 +84,7 @@ final class QuickChatController: NSObject, NSWindowDelegate {
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var hotkeyRegistered = false
     @ObservationIgnored private var windowPicker: QuickChatWindowPicker?
-    @ObservationIgnored private var isAgentMenuActive = false
+    @ObservationIgnored private var isNativeMenuActive = false
 
     init(
         enableUI: Bool = true,
@@ -196,8 +217,9 @@ final class QuickChatController: NSObject, NSWindowDelegate {
         guard self.isVisible else { return }
         // System permission dialogs steal key focus mid-grant; the bar must survive that flow.
         guard !self.model.isGrantingPermissions,
+              !self.model.isCapturingTextContext,
               self.windowPicker?.isInteractionActive != true,
-              !self.isAgentMenuActive
+              !self.isNativeMenuActive
         else { return }
         self.dismiss()
     }
@@ -273,8 +295,8 @@ final class QuickChatController: NSObject, NSWindowDelegate {
             onShowAgentPicker: { [weak self] in
                 self?.showAgentPicker()
             },
-            onWindowScreenshot: { [weak self] in
-                self?.startWindowPicker()
+            onShowCaptureMenu: { [weak self] in
+                self?.showCaptureMenu()
             },
             onContentHeightChange: { [weak self] height in
                 self?.updateContentHeight(height)
@@ -345,8 +367,9 @@ final class QuickChatController: NSObject, NSWindowDelegate {
     private func dismissIfClickOutside(at point: NSPoint) {
         guard self.isVisible,
               !self.model.isGrantingPermissions,
+              !self.model.isCapturingTextContext,
               self.windowPicker?.isInteractionActive != true,
-              !self.isAgentMenuActive,
+              !self.isNativeMenuActive,
               let panel = self.panel
         else { return }
         if !panel.frame.contains(point) {
@@ -360,10 +383,10 @@ final class QuickChatController: NSObject, NSWindowDelegate {
               let contentView = panel.contentView
         else { return }
 
-        self.isAgentMenuActive = true
+        self.isNativeMenuActive = true
         self.removeDismissMonitors()
         defer {
-            self.isAgentMenuActive = false
+            self.isNativeMenuActive = false
             if self.isVisible { self.installDismissMonitors() }
             self.focusEditor()
         }
@@ -388,7 +411,47 @@ final class QuickChatController: NSObject, NSWindowDelegate {
         menu.popUp(positioning: nil, at: contentPoint, in: contentView)
     }
 
-    private func startWindowPicker() {
+    private func showCaptureMenu() {
+        guard self.model.canCaptureWindow,
+              let panel,
+              let contentView = panel.contentView
+        else { return }
+
+        self.isNativeMenuActive = true
+        self.removeDismissMonitors()
+        defer {
+            self.isNativeMenuActive = false
+            if self.isVisible { self.installDismissMonitors() }
+            self.focusEditor()
+        }
+
+        let target = QuickChatCaptureMenuTarget { [weak self] action in
+            switch action {
+            case .window:
+                self?.startCapturePicker(area: false)
+            case .area:
+                self?.startCapturePicker(area: true)
+            }
+        }
+        let menu = NSMenu()
+        for (title, action) in [
+            ("Capture Window…", QuickChatCaptureMenuAction.window),
+            ("Capture Area…", QuickChatCaptureMenuAction.area),
+        ] {
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(QuickChatCaptureMenuTarget.selectCapture(_:)),
+                keyEquivalent: "")
+            item.target = target
+            item.representedObject = action.rawValue
+            menu.addItem(item)
+        }
+        let windowPoint = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let contentPoint = contentView.convert(windowPoint, from: nil)
+        menu.popUp(positioning: nil, at: contentPoint, in: contentView)
+    }
+
+    private func startCapturePicker(area: Bool) {
         guard self.isVisible, self.model.canCaptureWindow else { return }
         if self.windowPicker == nil {
             self.windowPicker = QuickChatWindowPicker(
@@ -401,7 +464,13 @@ final class QuickChatController: NSObject, NSWindowDelegate {
                 })
         }
         guard let windowPicker = self.windowPicker else { return }
-        Task { await windowPicker.begin() }
+        Task {
+            if area {
+                await windowPicker.beginArea()
+            } else {
+                await windowPicker.beginWindow()
+            }
+        }
     }
 
     private func pickerInteractionChanged(_ active: Bool) {
@@ -413,7 +482,7 @@ final class QuickChatController: NSObject, NSWindowDelegate {
         guard let panel else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
-            panel.animator().alphaValue = active ? 0.35 : 1
+            panel.animator().alphaValue = active ? 0 : 1
         } completionHandler: { [weak self] in
             Task { @MainActor in
                 if active == false { self?.focusEditor() }
